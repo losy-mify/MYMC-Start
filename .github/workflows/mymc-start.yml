@@ -48,7 +48,7 @@ jobs:
             | sed 's/\([0-9]*\.[0-9]*\.[0-9]*\.\)[0-9]*/\1**/g'
 
       - name: 🐍 安装 Python 依赖
-        run: pip install websocket-client
+        run: pip install websockets
 
       - name: 🚀 运行脚本
         working-directory: current_repo
