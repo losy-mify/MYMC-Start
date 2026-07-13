@@ -1,170 +1,60 @@
-import os
-import re
-import json
-import time
-import uuid
-import asyncio
-import datetime
-import urllib.request
-import urllib.parse
+name: MYMC-Start
+on:
+  workflow_dispatch:
 
-# ============================================================
-# 配置参数（通过环境变量注入）
-# ============================================================
-_account    = os.environ.get("MYMC_ACCOUNT", ",").split(",", 1)
-SERVER_NAME = _account[0].strip()
-API_KEY     = _account[1].strip()
+permissions:
+  contents: write
 
-_tg        = os.environ.get("TG_BOT", ",").split(",", 1)
-TG_CHAT_ID = _tg[0].strip()
-TG_TOKEN   = _tg[1].strip()
+jobs:
+  run_mymc_start:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 检出当前仓库
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: current_repo
 
-LOCAL_PROXY = "http://127.0.0.1:8080"
-USE_PROXY   = bool(os.environ.get("GOST_PROXY"))
+      - name: 📥 下载私库脚本
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/MYMC-Start-Private
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          path: private
 
-WS_URL    = f"wss://panel.my-mc.link/ws?apiKey={API_KEY}"
-WS_ORIGIN = "https://panel.my-mc.link"
+      - name: 📂 移动脚本到工作目录
+        run: mv private/mymc-start.py current_repo/mymc-start.py
 
-# ============================================================
-# 日志
-# ============================================================
-def log(msg: str):
-    print(msg, flush=True)
+      - name: 🐍 设置 Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-# ============================================================
-# 工具
-# ============================================================
-def now_str():
-    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+      - name: 🛡️ 启动 GOST 代理转发（可选）
+        if: ${{ env.GOST_PROXY != '' }}
+        env:
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+        run: |
+          VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest \
+            | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
+          echo "📦 GOST 版本: $VERSION"
+          wget -q "https://github.com/ginuerzh/gost/releases/download/v${VERSION}/gost_${VERSION}_linux_amd64.tar.gz"
+          tar -xzf "gost_${VERSION}_linux_amd64.tar.gz"
+          chmod +x gost
+          nohup ./gost -L http://:8080 -F "$GOST_PROXY" > gost.log 2>&1 &
+          sleep 3
+          echo "✅ GOST 已启动，测试连通性..."
+          curl -s -x http://127.0.0.1:8080 https://api.ipify.org \
+            | sed 's/\([0-9]*\.[0-9]*\.\)[0-9]*\.[0-9]*/\1**.**/g'
 
-# ============================================================
-# TG 推送
-# ============================================================
-def send_tg(result: str, uptime: str = ""):
-    msg = (
-        f"🎮 MYMC 启动通知\n"
-        f"🕐 运行时间：{now_str()}\n"
-        f"🖥 服务器：{SERVER_NAME}\n"
-        f"📅 利用期限：{uptime}\n"
-        f"🚀 启动结果：{result}"
-    )
-    if not TG_TOKEN or not TG_CHAT_ID:
-        log("ℹ️ 未配置TG_BOT，跳过推送")
-        return
-    url  = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    body = urllib.parse.urlencode({"chat_id": TG_CHAT_ID, "text": msg}).encode()
-    try:
-        with urllib.request.urlopen(
-            urllib.request.Request(url, data=body, method="POST"), timeout=15
-        ):
-            log("📨 TG推送成功")
-    except Exception as e:
-        log(f"⚠️ TG推送失败：{e}")
+      - name: 🐍 安装 Python 依赖
+        run: pip install websockets
 
-# ============================================================
-# WebSocket 启动
-# ============================================================
-async def _ws_start() -> bool:
-    import websockets
-
-    proxy_kw = {}
-    if USE_PROXY:
-        proxy_kw["proxy"] = LOCAL_PROXY
-
-    log("📡 连接 WebSocket...")
-    try:
-        async with websockets.connect(
-            WS_URL,
-            additional_headers={"Origin": WS_ORIGIN},
-            open_timeout=15,
-            close_timeout=5,
-            **proxy_kw,
-        ) as ws:
-            log("✅ 连接成功")
-
-            # 发送启动指令
-            request_id = str(uuid.uuid4())
-            payload = json.dumps({
-                "type":      "request",
-                "requestId": request_id,
-                "endpoint":  "/start",
-                "method":    "GET",
-                "body":      None,
-            })
-            log("🚀 发送启动指令...")
-            await ws.send(payload)
-
-            # 等待响应，最多30秒
-            deadline = asyncio.get_event_loop().time() + 30
-            while asyncio.get_event_loop().time() < deadline:
-                remaining = deadline - asyncio.get_event_loop().time()
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=min(remaining, 10))
-                    try:
-                        msg = json.loads(raw)
-                    except Exception:
-                        continue
-                    if msg.get("requestId") == request_id:
-                        if msg.get("success") is True and msg.get("message") == "Started":
-                            log("📩 服务器响应：✅ Started")
-                            return True
-                        else:
-                            log(f"📩 服务器响应：❌ {msg.get('message', '未知错误')}")
-                            return False
-                except asyncio.TimeoutError:
-                    log("⚠️ 等待响应超时")
-                    break
-
-    except Exception as e:
-        log(f"❌ WebSocket 错误：{e}")
-        return False
-
-    return False
-
-
-def ws_start_server() -> bool:
-    try:
-        return asyncio.run(asyncio.wait_for(_ws_start(), timeout=60))
-    except asyncio.TimeoutError:
-        log("❌ 整体超时（60s）")
-        return False
-    except Exception as e:
-        log(f"❌ 异常：{e}")
-        return False
-
-# ============================================================
-# 主流程
-# ============================================================
-def run_script():
-    if USE_PROXY:
-        log("🌐 验证出口IP...")
-        try:
-            proxies = urllib.request.ProxyHandler({
-                "http":  LOCAL_PROXY,
-                "https": LOCAL_PROXY,
-            })
-            opener = urllib.request.build_opener(proxies)
-            req = urllib.request.Request(
-                "https://api.ipify.org?format=json",
-                headers={"user-agent": "Mozilla/5.0"},
-            )
-            with opener.open(req, timeout=10) as r:
-                ip_data = json.loads(r.read().decode())
-            ip = re.sub(r"(\d+\.\d+\.)\d+\.\d+", r"\1**.**", ip_data.get("ip", ""))
-            log(f"✅ 出口IP确认：{ip}")
-        except Exception as e:
-            log(f"⚠️ IP验证失败：{e}")
-
-    ok = ws_start_server()
-
-    uptime = "23h 59m" if ok else ""
-    result = "✅ 启动成功！" if ok else "❌ 启动失败"
-    send_tg(result, uptime)
-
-
-if __name__ == "__main__":
-    _t0 = time.time()
-    print("=" * 55, flush=True)
-    run_script()
-    print("=" * 55, flush=True)
-    log(f"✅ 任务完成，耗时{time.time() - _t0:.1f}s")
+      - name: 🚀 运行脚本
+        working-directory: current_repo
+        env:
+          PYTHONIOENCODING: utf-8
+          MYMC_ACCOUNT: ${{ secrets.MYMC_ACCOUNT }}
+          GOST_PROXY: ${{ secrets.GOST_PROXY }}
+          TG_BOT: ${{ secrets.TG_BOT }}
+        run: python mymc-start.py
