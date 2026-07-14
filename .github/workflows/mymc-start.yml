@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 🛡️ 启动 GOST 代理转发（可选）
+      - name: 🛡️ 启动 GOST 代理转发
         if: ${{ env.GOST_PROXY != '' }}
         env:
           GOST_PROXY: ${{ secrets.GOST_PROXY }}
